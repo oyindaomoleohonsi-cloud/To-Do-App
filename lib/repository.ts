@@ -1,10 +1,10 @@
+import { getDatabase, type TaskRow } from "./db";
 import type { CreateTaskInput, Task, UpdateTaskInput } from "./tasks";
 
 /**
- * Everything the API needs from storage. Swapping the in-memory implementation
- * for a real database later means writing another class with this shape and
- * changing the `taskRepository` export at the bottom of this file — the routes
- * do not change.
+ * Everything the API needs from storage. Swapping SQLite for another database
+ * later means writing another class with this shape and changing the
+ * `taskRepository` export at the bottom of this file — the routes do not change.
  */
 export interface TaskRepository {
   list(): Task[];
@@ -15,78 +15,111 @@ export interface TaskRepository {
   clear(): void;
 }
 
-class InMemoryTaskRepository implements TaskRepository {
-  private readonly tasks = new Map<string, Task>();
+/** Converts a database row into the `Task` shape the app uses. */
+function toTask(row: TaskRow): Task {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    dueDate: row.due_date,
+    completed: row.completed === 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 
+class SqliteTaskRepository implements TaskRepository {
   list(): Task[] {
-    // Two tasks created in the same millisecond share a `createdAt`, which makes
-    // the date comparison a tie. Falling back to the insertion order keeps the
-    // newest first deterministic instead of leaving it to the sort.
-    return [...this.tasks.values()]
-      .map((task, index) => ({ index, task }))
-      .sort((a, b) => {
-        const byDate = b.task.createdAt.localeCompare(a.task.createdAt);
-        return byDate !== 0 ? byDate : b.index - a.index;
-      })
-      .map(({ task }) => task);
+    // `created_at` has millisecond resolution, so two tasks added in the same
+    // millisecond tie. `rowid` rises with insertion order, which keeps the
+    // newest first deterministic.
+    const rows = getDatabase()
+      .prepare("SELECT * FROM tasks ORDER BY created_at DESC, rowid DESC")
+      .all() as TaskRow[];
+
+    return rows.map(toTask);
   }
 
   findById(id: string): Task | undefined {
-    return this.tasks.get(id);
+    const row = getDatabase()
+      .prepare("SELECT * FROM tasks WHERE id = ?")
+      .get(id) as TaskRow | undefined;
+
+    return row ? toTask(row) : undefined;
   }
 
   create(input: CreateTaskInput): Task {
+    const database = getDatabase();
+    const id = crypto.randomUUID();
     const now = new Date().toISOString();
-    const task: Task = {
-      id: crypto.randomUUID(),
-      title: input.title,
-      description: input.description ?? null,
-      dueDate: input.dueDate ?? null,
-      completed: false,
-      createdAt: now,
-      updatedAt: now,
-    };
 
-    this.tasks.set(task.id, task);
-    return task;
+    database
+      .prepare(
+        `INSERT INTO tasks (id, title, description, due_date, completed, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 0, ?, ?)`,
+      )
+      .run(
+        id,
+        input.title,
+        input.description ?? null,
+        input.dueDate ?? null,
+        now,
+        now,
+      );
+
+    const created = this.findById(id);
+    if (!created) throw new Error("Task was not saved");
+
+    return created;
   }
 
   update(id: string, input: UpdateTaskInput): Task | undefined {
-    const existing = this.tasks.get(id);
-    if (!existing) return undefined;
+    const database = getDatabase();
 
-    const updated: Task = {
-      ...existing,
-      ...(input.title !== undefined && { title: input.title }),
-      ...(input.description !== undefined && { description: input.description }),
-      ...(input.dueDate !== undefined && { dueDate: input.dueDate }),
-      ...(input.completed !== undefined && { completed: input.completed }),
-      updatedAt: new Date().toISOString(),
-    };
+    // Column names are fixed literals below, so nothing user-supplied reaches
+    // the SQL text. Values are always passed as parameters.
+    const values: Array<string | number | null> = [];
+    const assignments: string[] = [];
 
-    this.tasks.set(id, updated);
-    return updated;
+    if (input.title !== undefined) {
+      assignments.push("title = ?");
+      values.push(input.title);
+    }
+    if (input.description !== undefined) {
+      assignments.push("description = ?");
+      values.push(input.description);
+    }
+    if (input.dueDate !== undefined) {
+      assignments.push("due_date = ?");
+      values.push(input.dueDate);
+    }
+    if (input.completed !== undefined) {
+      assignments.push("completed = ?");
+      values.push(input.completed ? 1 : 0);
+    }
+
+    assignments.push("updated_at = ?");
+    values.push(new Date().toISOString(), id);
+
+    const result = database
+      .prepare(`UPDATE tasks SET ${assignments.join(", ")} WHERE id = ?`)
+      .run(...values);
+
+    if (result.changes === 0) return undefined;
+
+    return this.findById(id);
   }
 
   remove(id: string): boolean {
-    return this.tasks.delete(id);
+    return getDatabase().prepare("DELETE FROM tasks WHERE id = ?").run(id).changes > 0;
   }
 
   clear(): void {
-    this.tasks.clear();
+    getDatabase().prepare("DELETE FROM tasks").run();
   }
 }
 
-// Kept on globalThis so data survives hot-reloads in `next dev` instead of
-// silently resetting to an empty list every time a file is edited.
-const globalScope = globalThis as typeof globalThis & {
-  __inMemoryTaskRepository?: TaskRepository;
-};
-
-export const taskRepository: TaskRepository =
-  globalScope.__inMemoryTaskRepository ?? new InMemoryTaskRepository();
-
-globalScope.__inMemoryTaskRepository = taskRepository;
+export const taskRepository: TaskRepository = new SqliteTaskRepository();
 
 /** Removes every task. Used by tests to start from a clean slate. */
 export function clearAllTasks(): void {

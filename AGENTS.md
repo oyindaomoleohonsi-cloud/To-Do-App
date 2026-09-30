@@ -182,19 +182,38 @@ A task is complete only when:
 - [ ] Any new env var is in `.env.example`
 - [ ] The changes are explained simply
 
+## Storage
+
+Tasks are stored in **SQLite** (a local file, no server to install).
+
+- `lib/env.ts` reads `DATABASE_PATH` (defaults to `.data/tasks.db`). This is the
+  only place that touches `process.env`.
+- `lib/db.ts` owns the connection and the schema.
+- `lib/repository.ts` implements the `TaskRepository` interface against SQLite.
+
+Rules for storage code:
+
+- **Open the connection lazily** via `getDatabase()`. Opening it while a module
+  is imported makes every `next build` worker open the file at once, which
+  deadlocks the build.
+- Write column names as fixed literals and pass all values as SQL parameters.
+- Sort newest first with `ORDER BY created_at DESC, rowid DESC` — `created_at`
+  only has millisecond resolution, so equal timestamps tie otherwise.
+- The database lives in `.data/`, which is gitignored. Never commit it.
+
+To move to Postgres or another database, implement `TaskRepository` and change
+the `taskRepository` export. Routes and the UI do not change.
+
 ## Current state
 
 Built so far:
 
 - Next.js App Router + TypeScript + Tailwind, with Vitest for tests.
 - Task API: `GET/POST /api/tasks`, `GET/PATCH/DELETE /api/tasks/[id]`.
-  Tasks are stored in memory via `lib/repository.ts` — swap in a real database
-  by implementing `TaskRepository`; the routes do not change.
 - Single-page UI with an add form, list, and complete/edit/delete actions.
-- Notes are **not** built yet.
-
-**Important:** tasks live in memory, so they are lost when the dev server
-restarts. This is expected until a database is added.
+- SQLite storage, so tasks survive a restart.
+- **Notes are not built yet.** The note routes and the `tasks/[id]` page in the
+  layout above are the next piece of work.
 
 
 <!-- BEGIN:nextjs-agent-rules -->

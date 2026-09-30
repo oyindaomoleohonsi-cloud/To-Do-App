@@ -17,6 +17,9 @@
 /.next/
 /out/
 
+# local database (SQLite file, see lib/env.ts)
+/.data/
+
 # production
 /build
 
